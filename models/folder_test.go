@@ -17,7 +17,8 @@ func TestFolder_Create(t *testing.T) {
 		Name: "new folder",
 	}
 
-	// 插入成功
+	// 不存在，插入成功
+	mock.ExpectQuery("SELECT(.+)folders(.+)").WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT(.+)").WillReturnResult(sqlmock.NewResult(5, 1))
 	mock.ExpectCommit()
@@ -27,12 +28,21 @@ func TestFolder_Create(t *testing.T) {
 	asserts.NoError(mock.ExpectationsWereMet())
 
 	// 插入失败
+	mock.ExpectQuery("SELECT(.+)folders(.+)").WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT(.+)").WillReturnError(errors.New("error"))
 	mock.ExpectRollback()
+	mock.ExpectQuery("SELECT(.+)folders(.+)").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
 	fid, err = folder.Create()
-	asserts.Error(err)
-	asserts.Equal(uint(0), fid)
+	asserts.NoError(err)
+	asserts.Equal(uint(1), fid)
+	asserts.NoError(mock.ExpectationsWereMet())
+
+	// 存在，直接返回
+	mock.ExpectQuery("SELECT(.+)folders(.+)").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(5))
+	fid, err = folder.Create()
+	asserts.NoError(err)
+	asserts.Equal(uint(5), fid)
 	asserts.NoError(mock.ExpectationsWereMet())
 }
 
@@ -212,12 +222,14 @@ func TestFolder_MoveOrCopyFileTo(t *testing.T) {
 			WithArgs(
 				1,
 				2,
+				3,
 				1,
 				1,
 			).WillReturnRows(
-			sqlmock.NewRows([]string{"id", "size"}).
-				AddRow(1, 10).
-				AddRow(2, 20),
+			sqlmock.NewRows([]string{"id", "size", "upload_session_id"}).
+				AddRow(1, 10, nil).
+				AddRow(2, 20, nil).
+				AddRow(2, 20, &folder.Name),
 		)
 		mock.ExpectBegin()
 		mock.ExpectExec("INSERT(.+)").WillReturnResult(sqlmock.NewResult(1, 1))
@@ -226,7 +238,7 @@ func TestFolder_MoveOrCopyFileTo(t *testing.T) {
 		mock.ExpectExec("INSERT(.+)").WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 		storage, err := folder.MoveOrCopyFileTo(
-			[]uint{1, 2},
+			[]uint{1, 2, 3},
 			&dstFolder,
 			true,
 		)
@@ -335,7 +347,7 @@ func TestFolder_CopyFolderTo(t *testing.T) {
 	// 测试复制目录结构
 	//       test(2)(5)
 	//    1(3)(6)    2.txt
-	//  3(4)(7) 4.txt
+	//  3(4)(7) 4.txt 5.txt(上传中)
 
 	// 正常情况 成功
 	{
@@ -360,9 +372,10 @@ func TestFolder_CopyFolderTo(t *testing.T) {
 		mock.ExpectQuery("SELECT(.+)").
 			WithArgs(1, 2, 3, 4).
 			WillReturnRows(
-				sqlmock.NewRows([]string{"id", "name", "folder_id", "size"}).
-					AddRow(1, "2.txt", 2, 10).
-					AddRow(2, "3.txt", 3, 20),
+				sqlmock.NewRows([]string{"id", "name", "folder_id", "size", "upload_session_id"}).
+					AddRow(1, "2.txt", 2, 10, nil).
+					AddRow(2, "3.txt", 3, 20, nil).
+					AddRow(3, "5.txt", 3, 20, &dstFolder.Name),
 			)
 
 		// 复制子文件
@@ -493,7 +506,8 @@ func TestFolder_MoveOrCopyFolderTo_Move(t *testing.T) {
 	}
 	// 目标目录
 	dstFolder := Folder{
-		Model: gorm.Model{ID: 10},
+		Model:   gorm.Model{ID: 10},
+		OwnerID: 1,
 	}
 
 	// 成功
@@ -506,6 +520,12 @@ func TestFolder_MoveOrCopyFolderTo_Move(t *testing.T) {
 		err := parFolder.MoveFolderTo([]uint{1, 2}, &dstFolder)
 		asserts.NoError(mock.ExpectationsWereMet())
 		asserts.NoError(err)
+	}
+
+	// 移动自己到自己内部，失败
+	{
+		err := parFolder.MoveFolderTo([]uint{10, 2}, &dstFolder)
+		asserts.Error(err)
 	}
 }
 
@@ -529,4 +549,74 @@ func TestFolder_FileInfoInterface(t *testing.T) {
 	asserts.Equal(time.Date(2019, 12, 21, 12, 40, 0, 0, time.UTC), folder.ModTime())
 	asserts.True(folder.IsDir())
 	asserts.Equal("/test", folder.GetPosition())
+}
+
+func TestTraceRoot(t *testing.T) {
+	asserts := assert.New(t)
+	var parentId uint
+	parentId = 5
+	folder := Folder{
+		ParentID: &parentId,
+		OwnerID:  1,
+		Name:     "test_name",
+	}
+
+	// 成功
+	{
+		mock.ExpectQuery("SELECT(.+)").WithArgs(5, 1).
+			WillReturnRows(sqlmock.NewRows([]string{"id", "name", "parent_id"}).AddRow(5, "parent", 1))
+		mock.ExpectQuery("SELECT(.+)").WithArgs(1, 0).
+			WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(5, "/"))
+		asserts.NoError(folder.TraceRoot())
+		asserts.Equal("/parent", folder.Position)
+		asserts.NoError(mock.ExpectationsWereMet())
+	}
+
+	// 出现错误
+	// 成功
+	{
+		mock.ExpectQuery("SELECT(.+)").WithArgs(5, 1).
+			WillReturnRows(sqlmock.NewRows([]string{"id", "name", "parent_id"}).AddRow(5, "parent", 1))
+		mock.ExpectQuery("SELECT(.+)").WithArgs(1, 0).
+			WillReturnError(errors.New("error"))
+		asserts.Error(folder.TraceRoot())
+		asserts.Equal("parent", folder.Position)
+		asserts.NoError(mock.ExpectationsWereMet())
+	}
+}
+
+func TestFolder_Rename(t *testing.T) {
+	asserts := assert.New(t)
+	folder := Folder{
+		Model: gorm.Model{
+			ID: 1,
+		},
+		Name:     "test_name",
+		OwnerID:  1,
+		Position: "/test",
+	}
+
+	// 成功
+	{
+		mock.ExpectBegin()
+		mock.ExpectExec("UPDATE(.+)folders(.+)SET(.+)").
+			WithArgs("test_name_new", 1).
+			WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectCommit()
+		err := folder.Rename("test_name_new")
+		asserts.NoError(mock.ExpectationsWereMet())
+		asserts.NoError(err)
+	}
+
+	// 出现错误
+	{
+		mock.ExpectBegin()
+		mock.ExpectExec("UPDATE(.+)folders(.+)SET(.+)").
+			WithArgs("test_name_new", 1).
+			WillReturnError(errors.New("error"))
+		mock.ExpectRollback()
+		err := folder.Rename("test_name_new")
+		asserts.NoError(mock.ExpectationsWereMet())
+		asserts.Error(err)
+	}
 }

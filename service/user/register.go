@@ -3,52 +3,26 @@ package user
 import (
 	"net/url"
 	"strings"
-	"time"
 
 	model "github.com/cloudreve/Cloudreve/v3/models"
 	"github.com/cloudreve/Cloudreve/v3/pkg/auth"
 	"github.com/cloudreve/Cloudreve/v3/pkg/email"
 	"github.com/cloudreve/Cloudreve/v3/pkg/hashid"
-	"github.com/cloudreve/Cloudreve/v3/pkg/recaptcha"
 	"github.com/cloudreve/Cloudreve/v3/pkg/serializer"
-	"github.com/cloudreve/Cloudreve/v3/pkg/util"
 	"github.com/gin-gonic/gin"
-	"github.com/mojocn/base64Captcha"
 )
 
 // UserRegisterService 管理用户注册的服务
 type UserRegisterService struct {
 	//TODO 细致调整验证规则
-	UserName    string `form:"userName" json:"userName" binding:"required,email"`
-	Password    string `form:"Password" json:"Password" binding:"required,min=4,max=64"`
-	CaptchaCode string `form:"captchaCode" json:"captchaCode"`
+	UserName string `form:"userName" json:"userName" binding:"required,email"`
+	Password string `form:"Password" json:"Password" binding:"required,min=4,max=64"`
 }
 
 // Register 新用户注册
 func (service *UserRegisterService) Register(c *gin.Context) serializer.Response {
 	// 相关设定
-	options := model.GetSettingByNames("email_active", "reg_captcha")
-	// 检查验证码
-	isCaptchaRequired := model.IsTrueVal(options["reg_captcha"])
-	useRecaptcha := model.IsTrueVal(model.GetSettingByName("captcha_IsUseReCaptcha"))
-	recaptchaSecret := model.GetSettingByName("captcha_ReCaptchaSecret")
-	if isCaptchaRequired && !useRecaptcha {
-		captchaID := util.GetSession(c, "captchaID")
-		util.DeleteSession(c, "captchaID")
-		if captchaID == nil || !base64Captcha.VerifyCaptcha(captchaID.(string), service.CaptchaCode) {
-			return serializer.ParamErr("验证码错误", nil)
-		}
-	} else if isCaptchaRequired && useRecaptcha {
-		captcha, err := recaptcha.NewReCAPTCHA(recaptchaSecret, recaptcha.V2, 10*time.Second)
-		if err != nil {
-			util.Log().Error(err.Error())
-		}
-		err = captcha.Verify(service.CaptchaCode)
-		if err != nil {
-			util.Log().Error(err.Error())
-			return serializer.ParamErr("验证失败，请刷新网页后再次验证", nil)
-		}
-	}
+	options := model.GetSettingByNames("email_active")
 
 	// 相关设定
 	isEmailRequired := model.IsTrueVal(options["email_active"])
@@ -64,10 +38,17 @@ func (service *UserRegisterService) Register(c *gin.Context) serializer.Response
 		user.Status = model.NotActivicated
 	}
 	user.GroupID = uint(defaultGroup)
-
+	userNotActivated := false
 	// 创建用户
 	if err := model.DB.Create(&user).Error; err != nil {
-		return serializer.DBErr("此邮箱已被使用", err)
+		//检查已存在使用者是否尚未激活
+		expectedUser, err := model.GetUserByEmail(service.UserName)
+		if expectedUser.Status == model.NotActivicated {
+			userNotActivated = true
+			user = expectedUser
+		} else {
+			return serializer.Err(serializer.CodeEmailExisted, "Email already in use", err)
+		}
 	}
 
 	// 发送激活邮件
@@ -79,7 +60,7 @@ func (service *UserRegisterService) Register(c *gin.Context) serializer.Response
 		controller, _ := url.Parse("/api/v3/user/activate/" + userID)
 		activateURL, err := auth.SignURI(auth.General, base.ResolveReference(controller).String(), 86400)
 		if err != nil {
-			return serializer.Err(serializer.CodeEncryptError, "无法签名激活URL", err)
+			return serializer.Err(serializer.CodeEncryptError, "Failed to sign the activation link", err)
 		}
 
 		// 取得签名
@@ -98,10 +79,14 @@ func (service *UserRegisterService) Register(c *gin.Context) serializer.Response
 			finalURL.String(),
 		)
 		if err := email.Send(user.Email, title, body); err != nil {
-			return serializer.Err(serializer.CodeInternalSetting, "无法发送激活邮件", err)
+			return serializer.Err(serializer.CodeFailedSendEmail, "Failed to send activation email", err)
 		}
-
-		return serializer.Response{Code: 203}
+		if userNotActivated == true {
+			//原本在上面要抛出的DBErr，放来这边抛出
+			return serializer.Err(serializer.CodeEmailSent, "User is not activated, activation email has been resent", nil)
+		} else {
+			return serializer.Response{Code: 203}
+		}
 	}
 
 	return serializer.Response{}
@@ -113,12 +98,12 @@ func (service *SettingService) Activate(c *gin.Context) serializer.Response {
 	uid, _ := c.Get("object_id")
 	user, err := model.GetUserByID(uid.(uint))
 	if err != nil {
-		return serializer.Err(serializer.CodeNotFound, "用户不存在", err)
+		return serializer.Err(serializer.CodeUserNotFound, "User not fount", err)
 	}
 
 	// 检查状态
 	if user.Status != model.NotActivicated {
-		return serializer.Err(serializer.CodeNoPermissionErr, "该用户无法被激活", nil)
+		return serializer.Err(serializer.CodeUserCannotActivate, "This user cannot be activated", nil)
 	}
 
 	// 激活用户

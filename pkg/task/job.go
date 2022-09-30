@@ -15,6 +15,8 @@ const (
 	TransferTaskType
 	// ImportTaskType 导入任务
 	ImportTaskType
+	// RecycleTaskType 回收任务
+	RecycleTaskType
 )
 
 // 任务状态
@@ -82,7 +84,7 @@ func Record(job Job) (*model.Task, error) {
 }
 
 // Resume 从数据库中恢复未完成任务
-func Resume() {
+func Resume(p Pool) {
 	tasks := model.GetTasksByStatus(Queued, Processing)
 	if len(tasks) == 0 {
 		return
@@ -96,7 +98,9 @@ func Resume() {
 			continue
 		}
 
-		TaskPoll.Submit(job)
+		if job != nil {
+			p.Submit(job)
+		}
 	}
 }
 
@@ -111,6 +115,8 @@ func GetJobFromModel(task *model.Task) (Job, error) {
 		return NewTransferTaskFromModel(task)
 	case ImportTaskType:
 		return NewImportTaskFromModel(task)
+	case RecycleTaskType:
+		return NewRecycleTaskFromModel(task)
 	default:
 		return nil, ErrUnknownTaskType
 	}

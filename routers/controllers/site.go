@@ -13,7 +13,6 @@ import (
 func SiteConfig(c *gin.Context) {
 	siteConfig := model.GetSettingByNames(
 		"siteName",
-		"siteICPId",
 		"login_captcha",
 		"reg_captcha",
 		"email_active",
@@ -24,8 +23,10 @@ func SiteConfig(c *gin.Context) {
 		"home_view_method",
 		"share_view_method",
 		"authn_enabled",
-		"captcha_IsUseReCaptcha",
 		"captcha_ReCaptchaKey",
+		"captcha_type",
+		"captcha_TCaptcha_CaptchaAppId",
+		"register_enabled",
 	)
 
 	// 如果已登录，则同时返回用户信息和标签
@@ -40,9 +41,14 @@ func SiteConfig(c *gin.Context) {
 
 // Ping 状态检查页面
 func Ping(c *gin.Context) {
+	version := conf.BackendVersion
+	if conf.IsPro == "true" {
+		version += "-pro"
+	}
+
 	c.JSON(200, serializer.Response{
 		Code: 0,
-		Data: conf.BackendVersion,
+		Data: version,
 	})
 }
 
